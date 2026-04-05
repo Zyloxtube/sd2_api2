@@ -7,7 +7,6 @@ import random
 import string
 import threading
 import uuid
-from datetime import datetime
 from html.parser import HTMLParser
 
 app = Flask(__name__)
@@ -163,7 +162,8 @@ def full_pipeline(prompt):
 
 # ========== API ==========
 
-@app.route('/generate', methods=['POST'])
+# 🔥 FIXED: now works in browser (GET)
+@app.route('/generate', methods=['GET'])
 def generate():
     prompt = request.args.get("prompt")
 
@@ -191,6 +191,7 @@ def generate():
 
     return jsonify({"jobId": job_id})
 
+# already correct
 @app.route('/status', methods=['GET'])
 def status():
     job_id = request.args.get("jobid")
@@ -204,6 +205,6 @@ def status():
 def home():
     return jsonify({"message": "API running 24/7 🚀"})
 
-# ========== RUN (LOCAL ONLY) ==========
+# local only
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
