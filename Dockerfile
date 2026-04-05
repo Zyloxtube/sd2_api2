@@ -7,5 +7,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# 🔥 IMPORTANT: only 1 worker
+# 🔥 still keep 1 worker (safe + simpler)
 CMD ["gunicorn", "-w", "1", "-b", "0.0.0.0:8080", "app:app"]
