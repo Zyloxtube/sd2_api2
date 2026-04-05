@@ -12,34 +12,35 @@ from html.parser import HTMLParser
 app = Flask(__name__)
 CORS(app)
 
+# ✅ shared memory (works now because 1 worker)
 jobs = {}
 
-# ========== Guerrilla Mail ==========
 API_BASE = 'https://api.guerrillamail.com/ajax.php'
 DOMAINS = ['sharklasers.com']
 
+# ---------- EMAIL ----------
 def generate_temp_email():
     res = requests.get(f"{API_BASE}?f=get_email_address")
     data = res.json()
 
     email = data["email_addr"]
-    sid_token = data["sid_token"]
+    token = data["sid_token"]
 
     local = email.split("@")[0]
-    return f"{local}@{DOMAINS[0]}", sid_token
+    return f"{local}@{DOMAINS[0]}", token
 
+# ---------- PASSWORD ----------
 def generate_password():
     return random.choice(string.ascii_uppercase) + ''.join(
         random.choices(string.ascii_lowercase, k=3)
     ) + str(random.randint(1000, 9999))
 
+# ---------- EMAIL CODE ----------
 def send_code(email):
-    res = requests.post(
+    requests.post(
         "https://api.buzzy.now/api/v1/user/send-email-code",
         json={"email": email, "type": 1}
     )
-    if res.json().get("code") != 200:
-        raise Exception("Failed to send code")
 
 class HTMLStripper(HTMLParser):
     def __init__(self):
@@ -60,11 +61,8 @@ def strip_html(html):
 def extract_code(text):
     if not text:
         return None
-    for pattern in [r'\d{6}', r'\d{5}', r'\d{4}']:
-        m = re.search(pattern, text)
-        if m:
-            return m.group()
-    return None
+    m = re.search(r'\d{4,6}', text)
+    return m.group() if m else None
 
 def wait_code(token):
     seen = set()
@@ -97,6 +95,7 @@ def wait_code(token):
 
     return None
 
+# ---------- REGISTER ----------
 def register(email, password, code):
     res = requests.post(
         "https://api.buzzy.now/api/v1/user/register",
@@ -109,6 +108,7 @@ def register(email, password, code):
 
     return data["data"]["token"]
 
+# ---------- CREATE PROJECT ----------
 def create_project(token, prompt):
     res = requests.post(
         "https://api.buzzy.now/api/app/v1/project/create",
@@ -123,9 +123,9 @@ def create_project(token, prompt):
         headers={"Authorization": f"Bearer {token}"}
     )
 
-    data = res.json()
-    return data["data"]["id"]
+    return res.json()["data"]["id"]
 
+# ---------- WAIT VIDEO ----------
 def wait_video(token, project_id):
     while True:
         res = requests.get(
@@ -138,14 +138,14 @@ def wait_video(token, project_id):
         for p in data.get("data", {}).get("records", []):
             if p["id"] == project_id:
                 if p["status"] == "completed":
-                    if p.get("results"):
-                        return p["results"][0]["videoUrl"]
+                    return p["results"][0]["videoUrl"]
 
-                elif p["status"] == "failed":
+                if p["status"] == "failed":
                     raise Exception("Video failed")
 
         time.sleep(5)
 
+# ---------- PIPELINE ----------
 def full_pipeline(prompt):
     email, token = generate_temp_email()
     password = generate_password()
@@ -158,11 +158,12 @@ def full_pipeline(prompt):
 
     user_token = register(email, password, code)
     project_id = create_project(user_token, prompt)
+
     return wait_video(user_token, project_id)
 
-# ========== API ==========
+# ---------- API ----------
 
-# 🔥 FIXED: now works in browser (GET)
+# ✅ browser GET
 @app.route('/generate', methods=['GET'])
 def generate():
     prompt = request.args.get("prompt")
@@ -171,27 +172,20 @@ def generate():
         return jsonify({"error": "Missing prompt"}), 400
 
     job_id = str(uuid.uuid4())
-
     jobs[job_id] = {"status": "processing"}
 
     def task():
         try:
             video = full_pipeline(prompt)
-            jobs[job_id] = {
-                "status": "completed",
-                "video_url": video
-            }
+            jobs[job_id] = {"status": "completed", "video_url": video}
         except Exception as e:
-            jobs[job_id] = {
-                "status": "failed",
-                "error": str(e)
-            }
+            jobs[job_id] = {"status": "failed", "error": str(e)}
 
     threading.Thread(target=task).start()
 
     return jsonify({"jobId": job_id})
 
-# already correct
+# ✅ status
 @app.route('/status', methods=['GET'])
 def status():
     job_id = request.args.get("jobid")
@@ -205,6 +199,6 @@ def status():
 def home():
     return jsonify({"message": "API running 24/7 🚀"})
 
-# local only
+# local run
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
