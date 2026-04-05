@@ -7,18 +7,21 @@ import random
 import string
 import threading
 import uuid
+import json
+import os
+import redis
 from html.parser import HTMLParser
 
 app = Flask(__name__)
 CORS(app)
 
-# ✅ shared memory (works now because 1 worker)
-jobs = {}
+# 🔥 KV (Upstash Redis)
+r = redis.from_url(os.environ.get("REDIS_URL"))
 
+# ---------- Guerrilla Mail ----------
 API_BASE = 'https://api.guerrillamail.com/ajax.php'
 DOMAINS = ['sharklasers.com']
 
-# ---------- EMAIL ----------
 def generate_temp_email():
     res = requests.get(f"{API_BASE}?f=get_email_address")
     data = res.json()
@@ -29,19 +32,18 @@ def generate_temp_email():
     local = email.split("@")[0]
     return f"{local}@{DOMAINS[0]}", token
 
-# ---------- PASSWORD ----------
 def generate_password():
     return random.choice(string.ascii_uppercase) + ''.join(
         random.choices(string.ascii_lowercase, k=3)
     ) + str(random.randint(1000, 9999))
 
-# ---------- EMAIL CODE ----------
 def send_code(email):
     requests.post(
         "https://api.buzzy.now/api/v1/user/send-email-code",
         json={"email": email, "type": 1}
     )
 
+# ---------- HTML ----------
 class HTMLStripper(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -108,7 +110,7 @@ def register(email, password, code):
 
     return data["data"]["token"]
 
-# ---------- CREATE PROJECT ----------
+# ---------- PROJECT ----------
 def create_project(token, prompt):
     res = requests.post(
         "https://api.buzzy.now/api/app/v1/project/create",
@@ -125,7 +127,6 @@ def create_project(token, prompt):
 
     return res.json()["data"]["id"]
 
-# ---------- WAIT VIDEO ----------
 def wait_video(token, project_id):
     while True:
         res = requests.get(
@@ -145,25 +146,38 @@ def wait_video(token, project_id):
 
         time.sleep(5)
 
+# ---------- KV HELPERS ----------
+def save_job(job_id, data):
+    r.set(job_id, json.dumps(data))
+
+def get_job(job_id):
+    data = r.get(job_id)
+    return json.loads(data) if data else None
+
 # ---------- PIPELINE ----------
-def full_pipeline(prompt):
-    email, token = generate_temp_email()
-    password = generate_password()
+def full_pipeline(prompt, job_id):
+    try:
+        email, token = generate_temp_email()
+        password = generate_password()
 
-    send_code(email)
-    code = wait_code(token)
+        send_code(email)
+        code = wait_code(token)
 
-    if not code:
-        raise Exception("No code received")
+        if not code:
+            raise Exception("No code received")
 
-    user_token = register(email, password, code)
-    project_id = create_project(user_token, prompt)
+        user_token = register(email, password, code)
+        project_id = create_project(user_token, prompt)
 
-    return wait_video(user_token, project_id)
+        video = wait_video(user_token, project_id)
+
+        save_job(job_id, {"status": "completed", "video_url": video})
+
+    except Exception as e:
+        save_job(job_id, {"status": "failed", "error": str(e)})
 
 # ---------- API ----------
 
-# ✅ browser GET
 @app.route('/generate', methods=['GET'])
 def generate():
     prompt = request.args.get("prompt")
@@ -172,20 +186,15 @@ def generate():
         return jsonify({"error": "Missing prompt"}), 400
 
     job_id = str(uuid.uuid4())
-    jobs[job_id] = {"status": "processing"}
 
-    def task():
-        try:
-            video = full_pipeline(prompt)
-            jobs[job_id] = {"status": "completed", "video_url": video}
-        except Exception as e:
-            jobs[job_id] = {"status": "failed", "error": str(e)}
+    # save initial state in KV
+    save_job(job_id, {"status": "processing"})
 
-    threading.Thread(target=task).start()
+    # background thread
+    threading.Thread(target=full_pipeline, args=(prompt, job_id)).start()
 
     return jsonify({"jobId": job_id})
 
-# ✅ status
 @app.route('/status', methods=['GET'])
 def status():
     job_id = request.args.get("jobid")
@@ -193,12 +202,16 @@ def status():
     if not job_id:
         return jsonify({"error": "Missing jobid"}), 400
 
-    return jsonify(jobs.get(job_id, {"error": "Not found"}))
+    job = get_job(job_id)
+
+    if not job:
+        return jsonify({"error": "Not found"}), 404
+
+    return jsonify(job)
 
 @app.route('/')
 def home():
     return jsonify({"message": "API running 24/7 🚀"})
 
-# local run
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
